@@ -282,7 +282,7 @@ class ResNet50(nn.Module):
         for i, num_this_layer in enumerate(layers_cfg):
             self.blocks.append(list(self.model.children())[num_this_layer])
 
-    def forward_features(self, x):
+    def forward_features(self, x, *args, **kwargs):
         feature_map = []
         x = self.model.conv1(x)
         x = self.model.bn1(x)
@@ -399,7 +399,8 @@ class MVSSNet(ResNet50):
 
         out_edge, out_mask = res1, x0
         criterion_BCE = torch.nn.BCEWithLogitsLoss()
-        gmp = torch.nn.MaxPool2d(512)
+        size_int = tuple([int(x) for x in size])
+        gmp = torch.nn.MaxPool2d(size_int[0])
         loss, loss_seg, loss_clf, loss_edg, out_mask, out_edge, out_label = predict_loss(in_imgs=image,
                                                                                                                     in_masks=mask, 
                                                                                                                     in_edges=edge_mask, 

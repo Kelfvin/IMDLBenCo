@@ -15,8 +15,7 @@ from IMDLBenCo.registry import MODELS, POSTFUNCS
 from IMDLBenCo.datasets import ManiDataset, JsonDataset
 from IMDLBenCo.evaluation import PixelF1, ImageF1    # TODO You can select evaluator you like here
 
-from IMDLBenCo.training_scripts.tester import test_one_epoch
-
+from IMDLBenCo.training_scripts.tester import inference_and_save_one_epoch
 def get_args_parser():
     parser = argparse.ArgumentParser('IMDLBench testing launch!', add_help=True)
     # -------------------------------
@@ -39,7 +38,7 @@ def get_args_parser():
     # If edge mask activated
     parser.add_argument('--edge_mask_width', default=None, type=int,
                         help='Edge broaden size (in pixels) for edge maks generator.')
-    parser.add_argument('--test_data_json', default='/root/Dataset/CASIA1.0', type=str,
+    parser.add_argument('--test_data_path', default='/root/Dataset/CASIA1.0', type=str,
                         help='test dataset json, should be a json file contains many datasets. Details are in readme.md')
     # ------------------------------------
     # Testing 相关的参数
@@ -50,7 +49,7 @@ def get_args_parser():
                         help='Do not use model.eval() during testing.')
 
     # ----输出的日志相关的参数-----------
-    parser.add_argument('--output_dir', default='./output_dir',
+    parser.add_argument('--output_dir', default='./save_img_dir',
                         help='path where to save, empty for no saving')
     parser.add_argument('--log_dir', default='./output_dir',
                         help='path where to tensorboard log')
@@ -114,11 +113,7 @@ def main(args, model_args):
         #     var_limit=(15, 15),
         #     p = 1
         # )
-        ])
-
-    with open(args.test_data_json, "r") as f:
-        test_dataset_json = json.load(f)
-    
+        ])  
     
     if args.distributed:
         num_tasks = misc.get_world_size()
@@ -126,15 +121,6 @@ def main(args, model_args):
     else:
         global_rank = 0
     
-    # ========define the model directly==========
-    # model = IML_ViT(
-    #     vit_pretrain_path = model_args.vit_pretrain_path,
-    #     predict_head_norm= model_args.predict_head_norm,
-    #     edge_lambda = model_args.edge_lambda
-    # )
-    
-    # --------------- or -------------------------
-    # Init model with registry
     model = MODELS.get(args.model)
     
     # Filt usefull args
@@ -144,22 +130,9 @@ def main(args, model_args):
         model_init_params = inspect.signature(model.__init__).parameters
         
     combined_args = {k: v for k, v in vars(args).items() if k in model_init_params}
-    for k, v in vars(model_args).items():
-        if k in model_init_params and k not in combined_args:
-            combined_args[k] = v
+    combined_args.update({k: v for k, v in vars(model_args).items() if k in model_init_params})
     model = model(**combined_args)
-    # ============================================
 
-    """
-    TODO Set the evaluator you want to use
-    You can use PixelF1, ImageF1, or any other evaluator you like.
-    Available evaluators are in: https://github.com/scu-zjz/IMDLBenCo/blob/main/IMDLBenCo/evaluation/__init__.py
-    """    
-    evaluator_list = [
-        PixelF1(threshold=0.5, mode="origin"),
-        # ImageF1(threshold=0.5)
-    ]
-    
     if args.distributed:
         model = torch.nn.SyncBatchNorm.convert_sync_batchnorm(model)
 
@@ -188,103 +161,70 @@ def main(args, model_args):
     dataset_dict = {}
     dataset_logger = {}
     # Start go through each datasets:
-    for dataset_name, dataset_path in test_dataset_json.items():
-        args.full_log_dir = os.path.join(args.log_dir, dataset_name)
-
-        if global_rank == 0 and args.full_log_dir is not None:
-            os.makedirs(args.full_log_dir, exist_ok=True)
-            log_writer = SummaryWriter(log_dir=args.full_log_dir)
-        else:
-            log_writer = None
-        dataset_logger[dataset_name] = log_writer
-        
-        # ---- dataset with crop augmentation ----
-        if os.path.isdir(dataset_path):
-            dataset_test = ManiDataset(
-                dataset_path,
-                is_padding=args.if_padding,
-                is_resizing=args.if_resizing,
-                output_size=(args.image_size, args.image_size),
-                common_transforms=test_transform,
-                edge_width=args.edge_mask_width,
-                post_funcs=post_function
-            )
-
-        else:
-            dataset_test = JsonDataset(
-                dataset_path,
-                is_padding=args.if_padding,
-                is_resizing=args.if_resizing,
-                output_size=(args.image_size, args.image_size),
-                common_transforms=test_transform,
-                edge_width=args.edge_mask_width,
-                post_funcs=post_function
-            )
-        # ------------------------------------
-        print(dataset_test)
-        print("len(dataset_test)", len(dataset_test))
-        
-        # Sampler
-        if args.distributed:
-            sampler_test = torch.utils.data.DistributedSampler(
-                dataset_test, 
-                num_replicas=num_tasks, 
-                rank=global_rank, 
-                shuffle=False,
-                drop_last=True
-            )
-            print("Sampler_test = %s" % str(sampler_test))
-        else:
-            sampler_test = torch.utils.data.RandomSampler(dataset_test)
-
-        dataloader_test = torch.utils.data.DataLoader(
-            dataset_test, 
-            sampler=sampler_test,
-            batch_size=args.test_batch_size,
-            num_workers=args.num_workers,
-            pin_memory=args.pin_mem,
-            drop_last=True,
+    dataset_path = args.test_data_path
+    # ---- dataset with crop augmentation ----
+    if os.path.isdir(dataset_path):
+        dataset_test = ManiDataset(
+            dataset_path,
+            is_padding=args.if_padding,
+            is_resizing=args.if_resizing,
+            output_size=(args.image_size, args.image_size),
+            common_transforms=test_transform,
+            edge_width=args.edge_mask_width,
+            post_funcs=post_function
         )
-        dataset_dict[dataset_name] = dataloader_test
-    print("dataset_dict", dataset_dict)
 
+    else:
+        dataset_test = JsonDataset(
+            dataset_path,
+            is_padding=args.if_padding,
+            is_resizing=args.if_resizing,
+            output_size=(args.image_size, args.image_size),
+            common_transforms=test_transform,
+            edge_width=args.edge_mask_width,
+            post_funcs=post_function
+        )
+    # ------------------------------------
+    print(dataset_test)
+    print("len(dataset_test)", len(dataset_test))
     
-    chkpt_list = os.listdir(args.checkpoint_path)
-    print(chkpt_list)
-    chkpt_pair = [(int(chkpt.split('-')[1].split('.')[0]) , chkpt) for chkpt in chkpt_list if chkpt.endswith(".pth")]
-    chkpt_pair.sort(key=lambda x: x[0])
-    print( "sorted checkpoint pairs in the ckpt dir: ",chkpt_pair)
-    for epoch , chkpt_dir in chkpt_pair:
-        if chkpt_dir.endswith(".pth"):
-            print("Loading checkpoint: %s" % chkpt_dir)
-            ckpt = os.path.join(args.checkpoint_path, chkpt_dir)
-            ckpt = torch.load(ckpt, map_location='cuda', weights_only=False)
-            model.module.load_state_dict(ckpt['model'])     
-            
-            for dataset_name, dataloader_test in dataset_dict.items():
-                print("Testing on dataset: %s" % dataset_name)
-                test_stats = test_one_epoch(
-                    model=model,
-                    data_loader=dataloader_test,
-                    evaluator_list=evaluator_list,
-                    device=device,
-                    epoch=epoch,
-                    name="normal",
-                    log_writer=dataset_logger[dataset_name],
-                    args=args
-                )
-                log_stats = {
-                    **{f'test_{k}': v for k, v in test_stats.items()},
-                        'epoch': epoch
-                }
-                if args.full_log_dir and misc.is_main_process():
-                    if dataset_logger[dataset_name] is not None:
-                        dataset_logger[dataset_name].flush()
-                    with open(os.path.join(args.full_log_dir, "log.txt"), mode="a", encoding="utf-8") as f:
-                        f.write(json.dumps(log_stats) + "\n")
-        local_time = time.time() - start_time
-        local_time_str = str(datetime.timedelta(seconds=int(local_time)))
-        print(f'Testing on ckpt {chkpt_dir} takes {local_time_str}')
+    # Sampler
+    if args.distributed:
+        sampler_test = torch.utils.data.DistributedSampler(
+            dataset_test, 
+            num_replicas=num_tasks, 
+            rank=global_rank, 
+            shuffle=False,
+            drop_last=True
+        )
+        print("Sampler_test = %s" % str(sampler_test))
+    else:
+        sampler_test = torch.utils.data.RandomSampler(dataset_test)
+
+    dataloader_test = torch.utils.data.DataLoader(
+        dataset_test, 
+        sampler=sampler_test,
+        batch_size=args.test_batch_size,
+        num_workers=args.num_workers,
+        pin_memory=args.pin_mem,
+        drop_last=True,
+    )
+
+    chkpt_dir = args.checkpoint_path
+    print(chkpt_dir)
+
+    print("Loading checkpoint: %s" % chkpt_dir)
+    ckpt = os.path.join(args.checkpoint_path, chkpt_dir)
+    ckpt = torch.load(ckpt, map_location='cuda', weights_only=False)
+    model.module.load_state_dict(ckpt['model'])            
+    test_stats = inference_and_save_one_epoch(
+                model=model,
+                data_loader=dataloader_test,
+                device=device,
+                name="save_img",
+                log_writer=None,
+                args=args
+            )
         
     total_time = time.time() - start_time
     total_time_str = str(datetime.timedelta(seconds=int(total_time)))

@@ -71,7 +71,7 @@ def get_args_parser():
                         help='find_unused_parameters for DDP. Mainly solve issue for model with image-level prediction but not activate during training.')
     
     # 不启用AMP（自动精度）进行训练
-    parser.add_argument('--if_not_amp', action='store_false',
+    parser.add_argument('--if_not_amp', action='store_true',
                         help='Do not use automatic precision.')
     parser.add_argument('--accum_iter', default=16, type=int,
                         help='Accumulate gradient iterations (for increasing the effective batch size under memory constraints)')
@@ -202,11 +202,12 @@ def main(args, model_args):
     print("Test transform: ", test_transform)
 
     # get post function (if have)
-    post_function_name = f"{args.model}_post_func"
+    post_function_name = f"{args.model.lower()}_post_func"
     print(f"Post function check: {post_function_name}")
     print(POSTFUNCS)
     try:
-        post_function = POSTFUNCS.get(post_function_name)
+        post_function = POSTFUNCS.get_lower(post_function_name)
+        print(f"Post function loaded: {post_function}")
     except Exception as e:
         print(f"Post function {post_function_name} not found, using default post function.")
         print(e)
